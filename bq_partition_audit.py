@@ -308,13 +308,14 @@ class SQLGlotExtractor(PartitionExtractor):
 
 
 def parse_job_batch(
-    sql_batch: list[str], target_col: str
+    batch: list[tuple[str, str]], target_col: str
 ) -> tuple[set[PartitionInfo], list[DimensionFilter]]:
     """Helper for process pool parsing."""
     extractor = SQLGlotExtractor()
     all_touched: set[PartitionInfo] = set()
     all_dims: list[DimensionFilter] = []
-    for sql in sql_batch:
+    for job_id, sql in batch:
+        logging.debug(f"Parsing job: {job_id}")
         p_info, d_info = extractor.extract_with_context(sql, target_col)
         all_touched.update(p_info)
         all_dims.extend(d_info)
@@ -394,10 +395,10 @@ class BigQueryAuditService:
 
     def stream_job_history(
         self, audit_project: str, target: TableMetadata, days: int
-    ) -> Generator[str, None, None]:
-        """Streams SQL query text from JOBS history to avoid high memory usage."""
+    ) -> Generator[tuple[str, str], None, None]:
+        """Streams SQL query text and job IDs from JOBS history."""
         sql = f"""
-        SELECT query
+        SELECT job_id, query
         FROM `{audit_project}.region-us`.INFORMATION_SCHEMA.JOBS
         WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
           AND job_type = 'QUERY'
@@ -410,7 +411,7 @@ class BigQueryAuditService:
         """
         results = self.client.query(sql).result()
         for row in results:
-            yield row.query
+            yield row.job_id, row.query
 
 
 class AuditConfig(BaseModel):
@@ -450,8 +451,8 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
         futures = []
         current_batch = []
 
-        for sql in history:
-            current_batch.append(sql)
+        for job_id, sql in history:
+            current_batch.append((job_id, sql))
             if len(current_batch) >= batch_size:
                 futures.append(
                     pool.submit(
