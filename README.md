@@ -53,13 +53,30 @@ $$S(n) = \frac{1}{(1-p) + \frac{p}{n}}$$
 
 Given that the streaming of job history is a IO-bound sequential operation and AST parsing is a CPU-bound parallel operation, $p$ typically approaches $0.95$ for large query sets.
 
+## Industrial Approaches to Partition Detection
+
+Research into alternative methods for determining accessed partitions reveals several strategies, each with distinct trade-offs:
+
+1.  **Dry Run Execution Plans**: By performing a dry run on a query, BigQuery provides a `totalBytesProcessed` estimate. While this indicates if pruning *occurred*, it does not explicitly list the partition IDs. This method is effective for forward-looking validation but requires re-executing (as dry runs) every historical query to be audited.
+2.  **`INFORMATION_SCHEMA.PARTITIONS`**: This view provides metadata about existing partitions (size, row count). However, it lacks a linkage to the jobs that accessed them. 
+3.  **Programmatic AST Parsing (Current Approach)**: Utilizing `INFORMATION_SCHEMA.JOBS` to retrieve historical SQL and parsing it remains the most robust metadata-only strategy. It avoids the costs and latencies of dry runs while providing granular, historical visibility into exact partition IDs.
+
 ## Usage
 
-The auditor is executed via the command-line interface with the following parameters:
+The auditor is executed via the command-line interface with the following options:
 
 ```bash
-python3 bq_partition_audit.py --project <AUDIT_PROJECT> --table <TARGET_TABLE> --days <WINDOW>
+python3 bq_partition_audit.py --project <PROJECT_ID> --table <DATASET.TABLE> [OPTIONS]
 ```
+
+### Command Line Options
+
+| Option | Description | Default |
+| :--- | :--- | :--- |
+| `--project` | The Google Cloud project ID for billing and auditing. | **Required** |
+| `--table` | The target table to audit (format: `project.dataset.table`). | **Required** |
+| `--days` | The number of days of job history to analyze. | `7` |
+| `--expand-dimensions` | Enables data-aware probing to resolve indirect dimension filters. | `False` |
 
 ### Reporting Output
 The tool produces a structured summary of accessed partitions, sorted by access frequency and chronological order:
