@@ -15,6 +15,15 @@ import sys
 from collections.abc import Generator
 from typing import Any, Protocol
 
+# --- Logging Layer ---
+
+
+def setup_logging(level: str = "INFO") -> None:
+    """Configures the unified logging system with standard formatting."""
+    fmt = "%(asctime)s | %(levelname)-8s | %(message)s"
+    logging.basicConfig(level=level.upper(), format=fmt, stream=sys.stderr)
+
+
 # --- Bootstrap Layer ---
 
 
@@ -76,7 +85,7 @@ def bootstrap() -> None:
 
 # Standard entry-point check for bootstrapping
 if __name__ == "__main__" and not os.environ.get("BQ_AUDIT_BOOTSTRAPPED"):
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    setup_logging("INFO")
     bootstrap()
 
 # --- Post-Bootstrap Standard Imports ---
@@ -421,11 +430,11 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
     metadata = service.fetch_table_metadata(parts[0], parts[1], parts[2])
 
     if not metadata.partition_column:
-        print(f"Table {config.target_table_ref} is not partitioned.")
+        logging.warning(f"Table {config.target_table_ref} is not partitioned. Aborting.")
         return
 
-    print(f"Auditing: {metadata.full_reference}")
-    print("Strategy: Optimized Parallel Parsing, Streaming Fetch")
+    logging.info(f"Auditing: {metadata.full_reference}")
+    logging.info(f"Strategy: Optimized Parallel Parsing (max_workers={config.parallelism})")
 
     # Fetch and batch for parallel parsing
     batch_size = 500  # Optimal chunk for IPC overhead
@@ -464,7 +473,7 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
 
     # Perform Dimension Expansion (Probing phase)
     if config.expand_dimensions and dimension_filters:
-        print(f"Expansion: Probing {len(dimension_filters)} dimension candidates...")
+        logging.info(f"Expansion: Probing {len(dimension_filters)} dimension candidates...")
         for dim in dimension_filters:
             # We skip specific columns that are obviously not join keys or target cols
             if dim.column == metadata.partition_column:
@@ -517,9 +526,15 @@ def main() -> None:
         action="store_true",
         help="Expand dimension filters (expensive)",
     )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Enable verbose DEBUG logging"
+    )
     args = parser.parse_args()
 
     try:
+        log_level = "DEBUG" if args.verbose else "INFO"
+        setup_logging(log_level)
+
         cfg = AuditConfig(
             audit_project=args.project,
             target_table_ref=args.table,
