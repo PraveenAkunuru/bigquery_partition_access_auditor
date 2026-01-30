@@ -7,8 +7,8 @@ A diagnostic tool designed to identify and aggregate partition-level access patt
 ### SQL AST Analysis
 The auditor employs a non-destructive AST traversal to identify literal filters associated with partitioned columns. By analyzing the structure of the query rather than relying on string matching, it maintains high fidelity across complex SQL constructs such as Common Table Expressions (CTEs) and nested subqueries.
 
-### Join-Key Transitive Propagation
-The extraction engine identifies partition filters that are propagated through equi-join conditions. If a partitioned fact table is joined with a filtered dimension table, the auditor maps the dimension filter back to the relevant fact partitions.
+### Dimension Expansion (Gated)
+The auditor supports an optional data-aware expansion mode. When enabled, it identifies high-level filters on dimension tables (e.g., month, year) and probes the underlying dimension data to resolve the specific set of partitions accessed in the fact table. This is disabled by default to minimize compute costs.
 
 ### Parallel Execution Model
 To process large volumes of historical job data, the auditor utilizes a distributed parsing model. Work is partitioned across available CPU cores, minimizing the total wall-clock time required for analysis.

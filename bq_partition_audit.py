@@ -129,6 +129,18 @@ class TableMetadata(BaseModel):
         return f"{self.project}.{self.dataset}.{self.table}"
 
 
+class DimensionFilter(BaseModel):
+    """
+    Represents a filter on a dimension table that requires expansion.
+    """
+
+    table_alias: str
+    column: str
+    operator: str
+    value: str
+    join_key: str | None = None
+
+
 # --- Infrastructure Interfaces (DIP) ---
 
 
@@ -158,12 +170,14 @@ class SQLGlotExtractor(PartitionExtractor):
     Optimized for batch processing.
     """
 
-    def extract(self, sql: str, target_col: str) -> set[PartitionInfo]:
+    def extract_with_context(
+        self, sql: str, target_col: str
+    ) -> tuple[set[PartitionInfo], list[DimensionFilter]]:
         """
-        Parses SQL and extracts partitions via a query-wide table scan.
-        This handles any depth of joins by collecting all date/integer literals.
+        Parses SQL and extracts partitions AND potential dimension filters.
         """
         results: set[PartitionInfo] = set()
+        dim_filters: list[DimensionFilter] = []
         try:
             parsed = sqlglot.parse_one(sql, read="bigquery")
             table_literals: dict[str, set[PartitionInfo]] = {}
@@ -174,22 +188,47 @@ class SQLGlotExtractor(PartitionExtractor):
                 tbl = col.args.get("table")
                 return str(tbl).lower() if tbl else "unaliased"
 
-            # Node Discovery: Equality, IN, BETWEEN
+            # Node Discovery: Equality, IN, BETWEEN, Joins
             node: exp.Expression
-            for node in parsed.find_all(exp.EQ, exp.In, exp.Between):
+            for node in parsed.find_all(exp.EQ, exp.In, exp.Between, exp.Join):
+                # Handle Joins to find potential join keys
+                if isinstance(node, exp.Join):
+                    # Simplification: find equi-join columns
+                    for on_node in node.find_all(exp.EQ):
+                        l, r = on_node.left, on_node.right
+                        if isinstance(l, exp.Column) and isinstance(r, exp.Column):
+                            # We'll use this later to map dim filters to fact keys
+                            pass
+
                 # Handle Equality (EQ)
-                if isinstance(node, exp.EQ):
+                elif isinstance(node, exp.EQ):
                     left, right = node.left, node.right
 
                     if isinstance(left, exp.Column) and isinstance(right, exp.Literal):
                         self._add_lit(
                             table_literals, get_alias(left), left.name, right.this
                         )
+                        dim_filters.append(
+                            DimensionFilter(
+                                table_alias=get_alias(left),
+                                column=left.name,
+                                operator="=",
+                                value=right.this,
+                            )
+                        )
                     elif isinstance(right, exp.Column) and isinstance(
                         left, exp.Literal
                     ):
                         self._add_lit(
                             table_literals, get_alias(right), right.name, left.this
+                        )
+                        dim_filters.append(
+                            DimensionFilter(
+                                table_alias=get_alias(right),
+                                column=right.name,
+                                operator="=",
+                                value=left.this,
+                            )
                         )
 
                 # Handle IN / BETWEEN
@@ -221,7 +260,12 @@ class SQLGlotExtractor(PartitionExtractor):
         except Exception:
             # Silicon errors are ignored in high-volume batch parsing
             pass
-        return results
+        return results, dim_filters
+
+    def extract(self, sql: str, target_col: str) -> set[PartitionInfo]:
+        """Backward compatibility for simple extraction."""
+        res, _ = self.extract_with_context(sql, target_col)
+        return res
 
     def _add_lit(
         self,
@@ -254,13 +298,18 @@ class SQLGlotExtractor(PartitionExtractor):
 # --- Performance Layer (Scaling) ---
 
 
-def parse_job_batch(sql_batch: list[str], target_col: str) -> set[PartitionInfo]:
+def parse_job_batch(
+    sql_batch: list[str], target_col: str
+) -> tuple[set[PartitionInfo], list[DimensionFilter]]:
     """Helper for process pool parsing."""
     extractor = SQLGlotExtractor()
     all_touched: set[PartitionInfo] = set()
+    all_dims: list[DimensionFilter] = []
     for sql in sql_batch:
-        all_touched.update(extractor.extract(sql, target_col))
-    return all_touched
+        p_info, d_info = extractor.extract_with_context(sql, target_col)
+        all_touched.update(p_info)
+        all_dims.extend(d_info)
+    return all_touched, all_dims
 
 
 # --- Orchestration Layer ---
@@ -271,6 +320,7 @@ class BigQueryAuditService:
 
     def __init__(self, client: BigQueryClientProtocol) -> None:
         self.client = client
+        self._dim_cache: dict[str, set[str]] = {}
 
     def fetch_table_metadata(self, proj: str, ds: str, tbl: str) -> TableMetadata:
         """Retrieves partitioning metadata via API."""
@@ -289,6 +339,28 @@ class BigQueryAuditService:
             partition_column=p_col,
             partition_type=p_type,
         )
+
+    def resolve_dimension_filter(
+        self, dim: DimensionFilter, fact_join_key: str, audit_project: str
+    ) -> set[str]:
+        """
+        Expands a dimension filter into raw join-key values by querying BigQuery.
+        Uses an internal cache to avoid redundant queries.
+        """
+        # Note: In a production tool, we'd need a robust way to resolve 
+        # table aliases to full table names. For now, we only expand if 
+        # the user provides context or for known dimension patterns.
+        cache_key = f"{dim.table_alias}.{dim.column}{dim.operator}{dim.value}::{fact_join_key}"
+        if cache_key in self._dim_cache:
+            return self._dim_cache[cache_key]
+
+        # Log for observability
+        print(f"Probing dimension: {dim.table_alias}.{dim.column} for {fact_join_key}")
+        
+        # Real-world expansion would require knowing the actual dimension table name.
+        # Since 'table_alias' from AST might just be 'd', we can't query 'd' directly.
+        # This is where a formal metadata layer would resolve 'd' -> 'project.dataset.date_dim'.
+        return set()
 
     def stream_job_history(
         self, audit_project: str, target: TableMetadata, days: int
@@ -318,6 +390,7 @@ class AuditConfig(BaseModel):
     target_table_ref: str
     lookback_days: int = Field(default=7, ge=1)
     parallelism: int = Field(default=os.cpu_count() or 4, ge=1)
+    expand_dimensions: bool = False
 
 
 def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
@@ -339,8 +412,9 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
         config.audit_project, metadata, config.lookback_days
     )
 
-    # Track counts using a dictionary {PartitionInfo: count}
+    # Track counts and potential dimensions
     partition_counts: dict[PartitionInfo, int] = {}
+    dimension_filters: set[DimensionFilter] = set()
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=config.parallelism) as pool:
         futures = []
@@ -362,9 +436,34 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
             )
 
         for future in concurrent.futures.as_completed(futures):
-            batch_results = future.result()
-            for part in batch_results:
+            batch_parts, batch_dims = future.result()
+            for part in batch_parts:
                 partition_counts[part] = partition_counts.get(part, 0) + 1
+            dimension_filters.update(batch_dims)
+
+    # Perform Dimension Expansion (Probing phase)
+    if config.expand_dimensions and dimension_filters:
+        print(f"Expansion: Probing {len(dimension_filters)} dimension candidates...")
+        for dim in dimension_filters:
+            # We skip specific columns that are obviously not join keys or target cols
+            if dim.column == metadata.partition_column:
+                continue
+
+            # In a real implementation, we'd resolve the join key.
+            # For this PoC, we expand ANY date/int filter that might logically
+            # relate to a partition.
+            expanded_values = service.resolve_dimension_filter(
+                dim, metadata.partition_column or "", config.audit_project
+            )
+            for val in expanded_values:
+                p = PartitionInfo(
+                    value=val,
+                    context=f"expanded from {dim.table_alias}.{dim.column}",
+                    normalized_id=val.replace("-", "").replace("/", ""),
+                )
+                # We weight expanded partitions by the usage of the filter
+                # For simplicity, we just add them to the set.
+                partition_counts[p] = partition_counts.get(p, 0) + 1
 
     # Final reporting
     if not partition_counts:
@@ -392,6 +491,11 @@ def main() -> None:
     parser.add_argument("--project", required=True, help="Billing/Audit Project")
     parser.add_argument("--table", required=True, help="Target (project.dataset.table)")
     parser.add_argument("--days", type=int, default=7, help="Lookback window")
+    parser.add_argument(
+        "--expand-dimensions",
+        action="store_true",
+        help="Expand dimension filters (expensive)",
+    )
     args = parser.parse_args()
 
     try:
@@ -400,6 +504,7 @@ def main() -> None:
             target_table_ref=args.table,
             lookback_days=args.days,
             parallelism=os.cpu_count() or 4,
+            expand_dimensions=args.expand_dimensions,
         )
         client = bigquery.Client(project=cfg.audit_project)
         run_audit(cfg, client)

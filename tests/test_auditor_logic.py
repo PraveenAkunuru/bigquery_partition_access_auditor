@@ -41,3 +41,19 @@ def test_integer_range_partition():
     normalized_ids = {p.normalized_id for p in results}
     assert "100" in normalized_ids
     assert "200" in normalized_ids
+
+def test_dimension_filter_detection():
+    extractor = SQLGlotExtractor()
+    sql = """
+    SELECT * 
+    FROM fact f
+    JOIN dim d ON f.key = d.key
+    WHERE d.month = '2023-10'
+    """
+    _, dim_filters = extractor.extract_with_context(sql, "_PARTITIONDATE")
+    
+    # Should detect the filter on d.month
+    dim_map = {f.table_alias: f for f in dim_filters}
+    assert "d" in dim_map
+    assert dim_map["d"].column == "month"
+    assert dim_map["d"].value == "2023-10"
