@@ -53,20 +53,13 @@ $$S(n) = \frac{1}{(1-p) + \frac{p}{n}}$$
 
 Given that the streaming of job history is a IO-bound sequential operation and AST parsing is a CPU-bound parallel operation, $p$ typically approaches $0.95$ for large query sets.
 
-## Industrial Research: Cross-Database Partition Auditing
+## Approach to Partition Detection
 
-Determining precisely which partitions are accessed by a query without performing a full data scan is a critical optimization problem. Approaches vary significantly across the industry:
+Research into alternative methods for determining accessed partitions reveals several strategies, each with distinct trade-offs:
 
-| Database | Primary Auditing Mechanism | Intelligent Method (Metadata-Only) |
-| :--- | :--- | :--- |
-| **BigQuery** | Execution logs & `INFORMATION_SCHEMA.JOBS` | **Programmatic AST Parsing** of historical SQL text (as implemented here). Dry runs provide cost estimates but not partition IDs. |
-| **Snowflake** | `QUERY_HISTORY` and `TABLE_PRUNING_HISTORY` | **Micro-partition Metadata Views**. Snowflake natively tracks `PARTITIONS_SCANNED` and `PARTITIONS_PRUNED` in specialized Account Usage views. |
-| **Databricks (Delta)** | Delta Transaction Log (`_delta_log`) | **Transaction Log Inspection**. Delta Lake can answer metadata-driven queries (e.g., `COUNT(*)`) entirely from the JSON/Parquet logs without touching data files. |
-| **AWS Redshift** | `SYS` and `SVL` Monitoring Views | **Query Plan Analysis**. Redshift captures execution plan steps (including Spectrum partition pruning) in system tables after execution. |
-| **Oracle** | `V$SQL_PLAN` and `V$SQL_PLAN_STATISTICS` | **PSTART/PSTOP Columns**. Oracle records the specific partition range targeted by the optimizer directly in the active SQL plan tables. |
-
-### Synthesis: Why AST Parsing for BigQuery?
-Unlike Snowflake or Delta Lake, which expose partition-level metrics as first-class metadata, BigQuery's audit logs primarily capture table-level access and byte-volume estimates. Programmatic AST reconstruction from the `query` field of `INFORMATION_SCHEMA.JOBS` provides the only high-fidelity way to retroactively audit join-based pruning patterns without incurring the cost of re-running queries as dry runs.
+1.  **Dry Run Execution Plans**: By performing a dry run on a query, BigQuery provides a `totalBytesProcessed` estimate. While this indicates if pruning *occurred*, it does not explicitly list the partition IDs. This method is effective for forward-looking validation but requires re-executing (as dry runs) every historical query to be audited.
+2.  **`INFORMATION_SCHEMA.PARTITIONS`**: This view provides metadata about existing partitions (size, row count). However, it lacks a linkage to the jobs that accessed them. 
+3.  **Programmatic AST Parsing (Current Approach)**: Utilizing `INFORMATION_SCHEMA.JOBS` to retrieve historical SQL and parsing it remains the most robust metadata-only strategy. It avoids the costs and latencies of dry runs while providing granular, historical visibility into exact partition IDs.
 
 ## Usage
 
