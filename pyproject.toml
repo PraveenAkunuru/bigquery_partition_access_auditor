@@ -1,0 +1,28 @@
+[project]
+name = "bq-partition-audit"
+version = "0.1.0"
+description = "Auditor for BigQuery partition usage"
+requires-python = ">=3.12"
+dependencies = [
+    "google-cloud-bigquery",
+    "pydantic>=2.0",
+    "sqlglot",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ANN"]
+ignore = ["ANN401"] # Allow Any for JNI-like boundaries
+
+[tool.ruff.lint.isort]
+known-first-party = ["bq_audit"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+warn_unused_configs = true
+disallow_untyped_defs = true
