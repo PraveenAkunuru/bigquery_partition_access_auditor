@@ -382,6 +382,7 @@ class BigQueryAuditService:
             query = f"SELECT DISTINCT {fact_join_key} FROM `{dim.table_alias}` WHERE {dim.column} {dim.operator} '{dim.value}'"
             try:
                 job = self.client.query(query)
+                logging.info(f"Dimension probe Job ID: {job.job_id}")
                 for row in job:
                     # In BQ row[0] works, but we also handle dict-like mocks
                     val = row[0] if isinstance(row, (tuple, list)) else list(row.values())[0] if isinstance(row, dict) else getattr(row, fact_join_key, None)
@@ -409,7 +410,9 @@ class BigQueryAuditService:
               AND t.table_id = '{target.table}'
           )
         """
-        results = self.client.query(sql).result()
+        results_job = self.client.query(sql)
+        logging.info(f"History fetch Job ID: {results_job.job_id}")
+        results = results_job.result()
         for row in results:
             yield row.job_id, row.query
 
@@ -437,6 +440,10 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
     logging.info(f"Auditing: {metadata.full_reference}")
     logging.info(f"Strategy: Optimized Parallel Parsing (max_workers={config.parallelism})")
 
+    # Track metrics
+    total_history_count = 0
+    total_probes_count = 0
+
     # Fetch and batch for parallel parsing
     batch_size = 500  # Optimal chunk for IPC overhead
     history = service.stream_job_history(
@@ -452,6 +459,7 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
         current_batch = []
 
         for job_id, sql in history:
+            total_history_count += 1
             current_batch.append((job_id, sql))
             if len(current_batch) >= batch_size:
                 futures.append(
@@ -475,6 +483,7 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
     # Perform Dimension Expansion (Probing phase)
     if config.expand_dimensions and dimension_filters:
         logging.info(f"Expansion: Probing {len(dimension_filters)} dimension candidates...")
+        total_probes_count = len(dimension_filters)
         for dim in dimension_filters:
             # We skip specific columns that are obviously not join keys or target cols
             if dim.column == metadata.partition_column:
@@ -495,6 +504,8 @@ def run_audit(config: AuditConfig, client: BigQueryClientProtocol) -> None:
                 # We weight expanded partitions by the usage of the filter
                 # For simplicity, we just add them to the set.
                 partition_counts[p] = partition_counts.get(p, 0) + 1
+
+    logging.info(f"Audit Summary: Processed {total_history_count} queries, performed {total_probes_count} probes.")
 
     # Final reporting
     if not partition_counts:
