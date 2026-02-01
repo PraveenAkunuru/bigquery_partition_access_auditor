@@ -20,7 +20,7 @@ def test_join_transitive_pruning():
     assert any(p.normalized_id == "20230505" for p in results)
 
 def test_query_95_complexity():
-    from extreme_tpcds_test import QUERY_95
+    from .extreme_tpcds_test import QUERY_95
     extractor = SQLGlotExtractor()
     results = extractor.extract(QUERY_95, "_PARTITIONDATE")
     
@@ -57,3 +57,31 @@ def test_dimension_filter_detection():
     assert "d" in dim_map
     assert dim_map["d"].column == "month"
     assert dim_map["d"].value == "2023-10"
+
+def test_extract_in_expressions():
+    extractor = SQLGlotExtractor()
+    sql = "SELECT * FROM tbl WHERE c IN ('2023-01-01', '2023-01-02')"
+    results = extractor.extract(sql, "c")
+    ids = {p.normalized_id for p in results}
+    assert "20230101" in ids
+    assert "20230102" in ids
+
+def test_partition_info_eq_and_hash():
+    p1 = PartitionInfo(value="v", context="c", normalized_id="n")
+    p2 = PartitionInfo(value="v", context="other", normalized_id="n")
+    p3 = PartitionInfo(value="x", context="c", normalized_id="x")
+    
+    assert p1 == p2
+    assert p1 != p3
+    assert p1 != "not a partition info"
+    assert hash(p1) == hash(p2)
+
+def test_add_lit_filtering():
+    extractor = SQLGlotExtractor()
+    # Test short values or non-alphanumeric that should be filtered out
+    results = extractor.extract("SELECT * FROM t WHERE c = 'a'", "c")
+    assert len(results) == 0
+    
+    # Test longer valid-looking strings
+    results = extractor.extract("SELECT * FROM t WHERE c = 'partition123'", "c")
+    assert len(results) > 0
